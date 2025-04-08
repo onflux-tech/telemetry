@@ -1,0 +1,269 @@
+# docker stack deploy --detach=true --prune --resolve-image always -c docker-compose.yml metrics
+
+x-logging: &default-logging
+  driver: "json-file"
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  traefik:
+    image: traefik:v2.11.7
+    command:
+      - "--api.dashboard=true"
+      - "--api.insecure=true"
+      - "--providers.docker.swarmMode=true"
+      - "--providers.docker.endpoint=unix:///var/run/docker.sock"
+      - "--providers.docker.exposedbydefault=false"
+      - "--providers.docker.network=network_public"
+      - "--entrypoints.web.address=:80"
+      - "--entrypoints.web.http.redirections.entryPoint.to=websecure"
+      - "--entrypoints.web.http.redirections.entryPoint.scheme=https"
+      - "--entrypoints.web.http.redirections.entrypoint.permanent=true"
+      - "--entrypoints.websecure.address=:443"
+      - "--certificatesresolvers.letsencryptresolver.acme.tlschallenge=true"
+      - "--certificatesresolvers.letsencryptresolver.acme.dnschallenge=true"
+      - "--certificatesresolvers.letsencryptresolver.acme.dnschallenge.provider=cloudflare"
+      - "--certificatesresolvers.letsencryptresolver.acme.email=your-email@example.com"
+      - "--certificatesresolvers.letsencryptresolver.acme.storage=/etc/traefik/letsencrypt/acme.json"
+      - "--log.level=INFO"
+      - "--log.format=common"
+      - "--log.filePath=/var/log/traefik/traefik.log"
+      - "--accesslog=true"
+      - "--accesslog.filepath=/var/log/traefik/access-log"
+      - "--ping=true"
+      - "--ping.entrypoint=ping"
+      - "--entryPoints.ping.address=:8082"
+      - "--metrics.prometheus=true"
+      - "--global.checkNewVersion=true"
+      - "--global.sendAnonymousUsage=false"
+    environment:
+      - CLOUDFLARE_EMAIL=your-email@example.com
+      - CLOUDFLARE_API_KEY=your-api-key
+    healthcheck:
+      test: ["CMD", "wget", "http://localhost:8082/ping", "--spider"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+    deploy:
+      placement:
+        constraints: [node.role == manager]
+      labels:
+        - "traefik.enable=true"
+        - "traefik.http.routers.dashboard.rule=Host(`traefik.your-domain.com`)"
+        - "traefik.http.routers.dashboard.service=api@internal"
+        - "traefik.http.routers.dashboard.entrypoints=websecure"
+        - "traefik.http.services.dashboard.loadbalancer.server.port=8080"
+        - "traefik.http.routers.dashboard.tls=true"
+        - "traefik.http.routers.dashboard.tls.certresolver=letsencryptresolver"
+        - "traefik.http.services.dashboard.loadbalancer.passhostheader=true"
+        - "traefik.http.routers.dashboard.middlewares=authtraefik"
+        - "traefik.http.middlewares.authtraefik.basicauth.users=your-email@example.com:$$apr1$$Sbl2sDir$$k/o6wvgC51yoBAHeU.1P01"
+        - "traefik.http.middlewares.redirect-https.redirectscheme.scheme=https"
+        - "traefik.http.middlewares.redirect-https.redirectscheme.permanent=true"
+        - "traefik.http.routers.http-catchall.rule=hostregexp(`{host:.+}`)"
+        - "traefik.http.routers.http-catchall.entrypoints=web"
+        - "traefik.http.routers.http-catchall.middlewares=redirect-https@docker"
+        - "traefik.http.routers.http-catchall.priority=1"
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
+    volumes:
+      - "/var/run/docker.sock:/var/run/docker.sock:ro"
+      - "certificates:/etc/traefik/letsencrypt"
+    ports:
+      - "80:80"
+      - "443:443/tcp"
+      - "443:443/udp"
+    networks:
+      - network_public
+      - monitoring
+    logging: *default-logging
+
+  grafana:
+    image: grafana/grafana:latest
+    networks:
+      - network_public
+      - monitoring
+    ports:
+      - "3000"
+    environment:
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_SECURITY_ADMIN_USER=your-admin-user
+      - GF_SECURITY_ADMIN_PASSWORD=your-admin-password
+      - GF_SERVER_ROOT_URL=https://metrics.your-domain.com
+      - GF_INSTALL_PLUGINS=grafana-clock-panel,grafana-piechart-panel
+      - GF_ALERTING_ENABLED=true
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning
+    deploy:
+      replicas: 1
+      placement:
+        constraints: [node.role == manager]
+      labels:
+        - traefik.enable=true
+        - traefik.http.routers.grafana.rule=Host(`metrics.your-domain.com`)
+        - traefik.http.routers.grafana.entrypoints=websecure
+        - traefik.http.routers.grafana.tls.certresolver=letsencryptresolver
+        - traefik.http.services.grafana.loadbalancer.server.port=3000
+        - traefik.http.services.grafana.loadbalancer.passHostHeader=true
+        - traefik.http.routers.grafana.service=grafana
+    logging: *default-logging
+
+  prometheus:
+    image: prom/prometheus:latest
+    networks:
+      - network_public
+      - monitoring
+    ports:
+      - "9090"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+      - ./prometheus/web.yml:/etc/prometheus/web.yml
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--web.external-url=https://metrics.your-domain.com/prometheus"
+      - "--storage.tsdb.retention.time=2d"
+      - "--web.config.file=/etc/prometheus/web.yml"
+    deploy:
+      replicas: 1
+      placement:
+        constraints: [node.role == manager]
+      labels:
+        - traefik.enable=true
+        - traefik.http.routers.prometheus.rule=Host(`metrics.your-domain.com`) && PathPrefix(`/prometheus`)
+        - traefik.http.routers.prometheus.entrypoints=websecure
+        - traefik.http.routers.prometheus.tls.certresolver=letsencryptresolver
+        - traefik.http.services.prometheus.loadbalancer.server.port=9090
+        - traefik.http.services.prometheus.loadbalancer.passHostHeader=true
+        - traefik.http.routers.prometheus.service=prometheus
+    logging: *default-logging
+
+  jaeger:
+    image: jaegertracing/all-in-one:latest
+    networks:
+      - network_public
+      - monitoring
+    ports:
+      - "16686"
+      - "14268"
+      - "4317"
+      - "4318"
+      - "14250"
+    environment:
+      - COLLECTOR_OTLP_ENABLED=true
+      - COLLECTOR_ZIPKIN_HTTP_PORT=9411
+      - QUERY_BASE_PATH=/jaeger
+    deploy:
+      replicas: 1
+      placement:
+        constraints: [node.role == manager]
+      labels:
+        - traefik.enable=true
+        - traefik.http.routers.jaeger.rule=Host(`metrics.your-domain.com`) && PathPrefix(`/jaeger`)
+        - traefik.http.routers.jaeger.entrypoints=websecure
+        - traefik.http.routers.jaeger.tls.certresolver=letsencryptresolver
+        - traefik.http.services.jaeger.loadbalancer.server.port=16686
+        - traefik.http.services.jaeger.loadbalancer.passHostHeader=true
+        - traefik.http.routers.jaeger.service=jaeger
+    logging: *default-logging
+
+  otel-collector:
+    image: otel/opentelemetry-collector:latest
+    networks:
+      - network_public
+      - monitoring
+    ports:
+      - "4317"
+      - "55681"
+      - "8888"
+      - "8889"
+      - "8881"
+    volumes:
+      - ./otel-collector/otel-config.yml:/etc/otel-collector-config.yml
+    command: ["--config", "/etc/otel-collector-config.yml"]
+    deploy:
+      replicas: 1
+      placement:
+        constraints: [node.role == manager]
+    logging: *default-logging
+
+  node-exporter:
+    image: prom/node-exporter:latest
+    networks:
+      - network_public
+      - monitoring
+    ports:
+      - "9100"
+    command:
+      - --path.procfs=/host/proc
+      - --path.sysfs=/host/sys
+      - --path.rootfs=/rootfs
+      - --collector.filesystem.ignored-mount-points
+      - ^/(sys|proc|dev|host|etc|rootfs/var/lib/docker/containers|rootfs/var/lib/docker/overlay2|rootfs/run/docker/netns)(/)
+    cap_add:
+      - SYS_TIME
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/rootfs:ro
+    deploy:
+      replicas: 1
+      placement:
+        constraints: [node.role == manager]
+    logging: *default-logging
+
+  postgres-exporter:
+    image: prometheuscommunity/postgres-exporter:latest
+    networks:
+      - network_public
+      - monitoring
+    environment:
+      - DATA_SOURCE_NAME=postgresql://your-db-user:your-db-password@postgres:5432/your-db-name?sslmode=disable
+    ports:
+      - "9187"
+    deploy:
+      replicas: 1
+      placement:
+        constraints: [node.role == manager]
+    logging: *default-logging
+
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:latest
+    networks:
+      - network_public
+      - monitoring
+    ports:
+      - "8080"
+    command: -logtostderr -docker_only
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /:/rootfs:ro
+      - /var/run:/var/run
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+    deploy:
+      mode: global
+      resources:
+        limits:
+          memory: 128M
+        reservations:
+          memory: 64M
+    logging: *default-logging
+
+networks:
+  network_public:
+    external: true
+    name: network_public
+  monitoring:
+
+volumes:
+  certificates:
+    external: true
+    name: certificates
+  grafana_data:
+    external: false
+    name: grafana_data

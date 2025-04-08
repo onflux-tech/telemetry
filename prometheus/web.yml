@@ -1,0 +1,6 @@
+# gerar hash: docker run --rm -it httpd:2.4-alpine htpasswd -nbB telemetry "telemetry" | cut -d ":" -f 2
+
+basic_auth_users:
+  telemetry: $2y$05$dh3ao5xRCf2/RegX6ex3/.2a0T2ytOuf3wgqU4LlleA.do7WnwSYq
+  # user: telemetry
+  # password: telemetry

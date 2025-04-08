@@ -1,0 +1,60 @@
+groups:
+  - name: targets
+    rules:
+      - alert: InstanceDown
+        expr: up == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Instância {{ $labels.instance }} está indisponível"
+          description: "{{ $labels.instance }} do job {{ $labels.job }} está indisponível há mais de 1 minuto."
+
+  - name: host
+    rules:
+      - alert: HighCpuLoad
+        expr: 100 - (avg by(instance) (irate(node_cpu_seconds_total{mode="idle"}[5m])) * 100) > 80
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Uso elevado de CPU (instância {{ $labels.instance }})"
+          description: "Uso de CPU acima de 80% por mais de 5 minutos"
+
+      - alert: HighMemoryLoad
+        expr: (node_memory_MemTotal_bytes - node_memory_MemAvailable_bytes) / node_memory_MemTotal_bytes * 100 > 80
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Uso elevado de memória (instância {{ $labels.instance }})"
+          description: "Uso de memória acima de 80% por mais de 5 minutos"
+
+      - alert: LowDiskSpace
+        expr: (node_filesystem_size_bytes - node_filesystem_free_bytes) / node_filesystem_size_bytes * 100 > 85
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Disco quase cheio (instância {{ $labels.instance }})"
+          description: "Disco utilizando mais de 85% do espaço disponível"
+
+  - name: containers
+    rules:
+      - alert: ContainerCpuUsage
+        expr: (sum(rate(container_cpu_usage_seconds_total[5m])) BY (name) * 100) > 80
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Uso elevado de CPU no contêiner {{ $labels.name }}"
+          description: "Contêiner {{ $labels.name }} está utilizando mais de 80% de CPU por mais de 5 minutos"
+
+      - alert: ContainerMemoryUsage
+        expr: (container_memory_usage_bytes / container_spec_memory_limit_bytes * 100) > 80
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Uso elevado de memória no contêiner {{ $labels.name }}"
+          description: "Contêiner {{ $labels.name }} está utilizando mais de 80% da memória limite por mais de 5 minutos"
